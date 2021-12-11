@@ -30,9 +30,9 @@ type Config struct {
 }
 
 type Oss struct {
-	AccessKeyid string
-	AccessKeysecret string
-	Rolearn string
+	AccessKeyid string `yaml:"AccessKeyid"`
+	AccessKeysecret string `yaml:"AccessKeysecret"`
+	Rolearn string `yaml:"Rolearn"`
 }
 
 type Sms struct {
@@ -62,12 +62,14 @@ type Notification struct {
 	Content string `json:"content"`
 	Phone string `json:"phone"`
 	Type string `json:"type"`
+	Handle string `json:"handle"`
+	Username string `json:"username"`
 	UserID uint
 }
 
 type Families struct {
 	ID uint `json:"id" gorm:"primarykey"`
-	BindID string `json:"bindphone"`
+	BindID uint `json:"bind_id"`
 	UserID uint
 }
 
@@ -77,7 +79,18 @@ type User struct {
 	Phone string `json:"phone" form:"phone"`
 	Code int `json:"code" form:"code"`
 	Profile string `json:"profile"`
+	Register string
 	CodeCreateAt time.Time
+}
+
+type Trends struct {
+	ID uint `json:"id" gorm:"primarykey"`
+	UserID uint `json:"user_id"`
+	Context string `json:"context"`
+	Weather string `json:"weather"`
+	Emotion string `json:"emotion"`
+	Photo string `json:"photo"`
+	CreateAt time.Time
 }
 
 var con Config
@@ -106,9 +119,16 @@ func main()  {
 		fmt.Printf("%v", e)
 	}
 
+	e = db.AutoMigrate(&Trends{})
+	if e != nil {
+		fmt.Printf("%v", e)
+	}
+
 	r := gin.Default()
 	r.Use(Cors())
 	authGroup := r.Group("/auth", UserJudge())
+
+	db.Table("users").Where("id = ?", 1).Update("code_create_at", time.Now())
 
 	r.POST("/phone/code", func(c *gin.Context) {
 		var register User
@@ -135,13 +155,13 @@ func main()  {
 						"message": "发送成功",
 					})
 				} else {
-					c.JSON(200, gin.H{
+					c.JSON(403, gin.H{
 						"code": 1,
 						"message": "请求过快",
 					})
 				}
 			} else {
-				c.JSON(200, gin.H{
+				c.JSON(403, gin.H{
 					"code": 2,
 					"message": "手机号有误",
 				})
@@ -156,19 +176,22 @@ func main()  {
 		if err := c.ShouldBind(&register); err == nil {
 			result := db.Table("users").Where("Phone = ?", register.Phone).Take(&exist)
 			if result.RowsAffected == 0 {
-				c.JSON(200, gin.H{
+				c.JSON(403, gin.H{
 					"code": 1,
 					"message": "未发送验证码",
 				})
 			} else if exist.Code == register.Code {
 				if time.Now().Sub(exist.CodeCreateAt).Minutes() >= 10{
-					c.JSON(200, gin.H{
+					c.JSON(403, gin.H{
 						"code": 3,
 						"message": "验证码有效期超时",
 					})
 				} else {
 					token, _ := GenToken(strconv.Itoa(int(exist.ID)))
-					if exist.Username == "" {
+
+					if exist.Register == "" {
+						db.Table("users").Where("phone = ?", register.Phone).Update("register", "2")
+
 						c.JSON(200, gin.H{
 							"code": 0,
 							"message": "注册成功",
@@ -193,7 +216,7 @@ func main()  {
 					}
 				}
 			} else {
-				c.JSON(200, gin.H{
+				c.JSON(403, gin.H{
 					"code": 2,
 					"message": "验证码错误",
 				})
@@ -258,15 +281,100 @@ func main()  {
 		}
 	})
 
-	authGroup.POST("/user/bind", func(c *gin.Context) {
-		var user User
+	authGroup.POST("/user/trend", func(c *gin.Context) {
+		var trend Trends
 
-		if err := c.ShouldBind(&user); err == nil {
+		if err := c.ShouldBind(&trend); err == nil {
+			trend.CreateAt = time.Now()
+			claim, _ := ParseToken(c.GetHeader("token"))
+			trend.UserID = ToUint(claim.UserID)
 
+			db.Table("trends").Create(&trend)
 
-			//db.Table("notifications").Create()
+			a := "https://ncuvlink.oss-cn-beijing.aliyuncs.com" + trend.Photo
+			trend.Photo = a
+			db.Table("trends").Where("user_id = ?", trend.UserID).Update("photo", trend.Photo)
+
+			c.JSON(200, gin.H{
+				"code": 0,
+				"message": "发布成功",
+			})
 		}
 	})
+
+	authGroup.GET("/user/trend", func(c *gin.Context) {
+		claim, _ := ParseToken(c.GetHeader("token"))
+		id := ToUint(claim.UserID)
+
+		var s []Families
+		db.Where("user_id = ?", id).Find(&s)
+
+		var allid []uint
+		allid = append(allid, id)
+		for i := 0; i < len(s); i++ {
+			allid = append(allid, s[i].BindID)
+		}
+
+		var trends []Trends
+
+		db.Table("trends").Where("user_id IN (?)", allid).Find(&trends)
+
+		c.JSON(200, gin.H{
+			"code": 0,
+			"message": "获取成功",
+			"data": trends,
+		})
+	})
+
+	authGroup.POST("/user/bind", func(c *gin.Context) {
+		var notification Notification
+		var user User
+		var exist User
+
+		if err := c.ShouldBind(&notification); err == nil {
+			result := db.Table("users").Where("phone = ?", notification.Phone).Take(&exist)
+
+			if result.RowsAffected == 0{
+				c.JSON(403, gin.H{
+					"code": 1,
+					"message": "该用户未注册",
+				})
+			} else {
+				notification.Type = "BindRequest"
+
+				claim, _ := ParseToken(c.GetHeader("token"))
+				id := ToUint(claim.UserID)
+				notification.UserID = exist.ID
+
+				db.Table("users").Where("id = ?", id).Take(&user)
+				notification.Username = user.Username
+
+				db.Table("notifications").Create(&notification)
+				c.JSON(200, gin.H{
+					"code": 0,
+					"message": "发送申请成功",
+				})
+			}
+		}
+	})
+
+	authGroup.GET("/user/notification", func(c *gin.Context) {
+		claim, _ := ParseToken(c.GetHeader("token"))
+		id := ToUint(claim.UserID)
+
+		var notification []Notification
+
+		db.Where("user_id = ?", id).Find(&notification)
+
+		c.JSON(200, gin.H{
+			"code": 0,
+			"message": "获取成功",
+		})
+	})
+	
+	//authGroup.PUT("/user/bind", func(c *gin.Context) {
+	//
+	//})
 
 	r.Run(":8080")
 }
@@ -341,7 +449,7 @@ func OssToken() *sts.AssumeRoleResponse {
 }
 
 func Initial() {
-	yamlFile, err := ioutil.ReadFile("./config/config.yaml")
+	yamlFile, err := ioutil.ReadFile("./vlink/config.yaml")
 	if err != nil {
 		log.Printf("yamlFile.Get err   #%v ", err)
 	}
